@@ -24,7 +24,11 @@ struct Command {
 static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
+	{ "backtrace", "Display information about backtrace", mon_backtrace},
 };
+#define NCOMMANDS (sizeof(commands)/sizeof(commands[0]))
+
+unsigned read_eip();
 
 /***** Implementations of basic kernel monitor commands *****/
 
@@ -33,7 +37,7 @@ mon_help(int argc, char **argv, struct Trapframe *tf)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(commands); i++)
+	for (i = 0; i < NCOMMANDS; i++)
 		cprintf("%s - %s\n", commands[i].name, commands[i].desc);
 	return 0;
 }
@@ -41,23 +45,67 @@ mon_help(int argc, char **argv, struct Trapframe *tf)
 int
 mon_kerninfo(int argc, char **argv, struct Trapframe *tf)
 {
-	extern char _start[], entry[], etext[], edata[], end[];
+	extern char _start[], etext[], edata[], end[];
 
 	cprintf("Special kernel symbols:\n");
-	cprintf("  _start                  %08x (phys)\n", _start);
-	cprintf("  entry  %08x (virt)  %08x (phys)\n", entry, entry - KERNBASE);
+	cprintf("  _start %08x (virt)  %08x (phys)\n", _start, _start - KERNBASE);
 	cprintf("  etext  %08x (virt)  %08x (phys)\n", etext, etext - KERNBASE);
 	cprintf("  edata  %08x (virt)  %08x (phys)\n", edata, edata - KERNBASE);
 	cprintf("  end    %08x (virt)  %08x (phys)\n", end, end - KERNBASE);
 	cprintf("Kernel executable memory footprint: %dKB\n",
-		ROUNDUP(end - entry, 1024) / 1024);
+		(end-_start+1023)/1024);
 	return 0;
 }
 
 int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf)
 {
+	cprintf("Stack backtrace:\n");
 	// Your code here.
+	uint32_t ebp;
+	uint32_t eip;
+	uint32_t arg0;
+	uint32_t arg1;
+	uint32_t arg2;
+	uint32_t arg3;
+	uint32_t arg4;
+	int count;
+	
+	ebp = read_ebp();
+	
+	eip = *((uint32_t*)ebp+1);
+	arg0 = *((uint32_t*)ebp+2);
+	arg1 = *((uint32_t*)ebp+3);
+	arg2 = *((uint32_t*)ebp+4);
+	arg3 = *((uint32_t*)ebp+5);
+	arg4 = *((uint32_t*)ebp+6);
+
+	do{
+		cprintf("   ebp %08x  eip %08x  args %08x %08x %08x %08x %08x\n", ebp, eip, arg0, arg1, arg2, arg3, arg4);
+		
+		struct Eipdebuginfo info;
+		debuginfo_eip(eip, &info);
+		     
+		cprintf("      %s:%d:  ", info.eip_file, info.eip_line);
+		for(count=0;count<info.eip_fn_namelen;count++)
+		{
+			cprintf("%c", info.eip_fn_name[count]);
+		}
+		cprintf("+%x\n", eip-info.eip_fn_addr);
+		
+		ebp = *(uint32_t *)ebp;
+		
+		if (ebp != 0)
+		{
+			eip = *((uint32_t*)ebp+1);
+			arg0 = *((uint32_t*)ebp+2);
+			arg1 = *((uint32_t*)ebp+3);
+			arg2 = *((uint32_t*)ebp+4);
+			arg3 = *((uint32_t*)ebp+5);
+			arg4 = *((uint32_t*)ebp+6);
+		}
+	}while(ebp != 0);
+										   
 	return 0;
 }
 
@@ -99,7 +147,7 @@ runcmd(char *buf, struct Trapframe *tf)
 	// Lookup and invoke the command
 	if (argc == 0)
 		return 0;
-	for (i = 0; i < ARRAY_SIZE(commands); i++) {
+	for (i = 0; i < NCOMMANDS; i++) {
 		if (strcmp(argv[0], commands[i].name) == 0)
 			return commands[i].func(argc, argv, tf);
 	}
@@ -122,4 +170,15 @@ monitor(struct Trapframe *tf)
 			if (runcmd(buf, tf) < 0)
 				break;
 	}
+}
+
+// return EIP of caller.
+// does not work if inlined.
+// putting at the end of the file seems to prevent inlining.
+unsigned
+read_eip()
+{
+	uint32_t callerpc;
+	__asm __volatile("movl 4(%%ebp), %0" : "=r" (callerpc));
+	return callerpc;
 }
